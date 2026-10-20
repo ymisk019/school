@@ -1,0 +1,140 @@
+name: Build apps (Windows / macOS / Linux / Android / iOS)
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      build_ios:
+        description: 'Also build iOS (needs the Apple secrets, see BUILD_APPS.md)'
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+
+env:
+  TAURI_CLI: npx --yes @tauri-apps/cli@2
+
+jobs:
+  # ---------------------------------------------------------------- desktop
+  desktop:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            args: ''
+          - os: macos-latest
+            args: '--target universal-apple-darwin'
+          - os: ubuntu-22.04
+            args: ''
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.os == 'macos-latest' && 'aarch64-apple-darwin,x86_64-apple-darwin' || '' }}
+      - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: './src-tauri -> target'
+      - name: Linux system libraries
+        if: matrix.os == 'ubuntu-22.04'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
+      - run: npm ci
+      - run: npx --yes @tauri-apps/cli@2 icon app-icon.png
+      - uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tauriScript: npx --yes @tauri-apps/cli@2
+          tagName: app-v__VERSION__
+          releaseName: 'Dark School v__VERSION__'
+          releaseBody: 'Download the installer for your system from the assets below.'
+          releaseDraft: true
+          prerelease: false
+          args: ${{ matrix.args }}
+
+  # ---------------------------------------------------------------- android
+  android:
+    needs: desktop
+    if: ${{ !cancelled() }}
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android,armv7-linux-androideabi,i686-linux-android,x86_64-linux-android
+      - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: './src-tauri -> target'
+      - name: Point Tauri at the runner's Android NDK
+        run: echo "NDK_HOME=$ANDROID_NDK_LATEST_HOME" >> "$GITHUB_ENV"
+      - run: npm ci
+      - run: $TAURI_CLI icon app-icon.png
+      - run: $TAURI_CLI android init
+      - run: $TAURI_CLI icon app-icon.png
+      - name: Lock the game to landscape
+        run: sed -i '0,/<activity/s//<activity android:screenOrientation="sensorLandscape"/' src-tauri/gen/android/app/src/main/AndroidManifest.xml
+      # Debug-signed APK: installs directly on any phone, no keystore needed.
+      - run: $TAURI_CLI android build --apk --debug --target aarch64
+      - id: apk
+        run: |
+          APK=$(find src-tauri/gen/android/app/build/outputs/apk -name '*.apk' | head -n1)
+          cp "$APK" DarkSchool-android.apk
+          echo "version=$(jq -r .version src-tauri/tauri.conf.json)" >> "$GITHUB_OUTPUT"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: DarkSchool-android
+          path: DarkSchool-android.apk
+      - name: Attach to the draft release
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh release upload "app-v${{ steps.apk.outputs.version }}" DarkSchool-android.apk --clobber
+
+  # -------------------------------------------------------------------- iOS
+  # Needs a paid Apple Developer account. Skipped unless you tick "build_ios".
+  ios:
+    if: ${{ github.event.inputs.build_ios == 'true' }}
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-ios
+      - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: './src-tauri -> target'
+      - run: npm ci
+      - run: $TAURI_CLI icon app-icon.png
+      - run: $TAURI_CLI ios init
+      - run: $TAURI_CLI icon app-icon.png
+      - run: $TAURI_CLI ios build --export-method app-store-connect
+        env:
+          APPLE_DEVELOPMENT_TEAM: ${{ secrets.APPLE_DEVELOPMENT_TEAM }}
+          IOS_CERTIFICATE: ${{ secrets.IOS_CERTIFICATE }}
+          IOS_CERTIFICATE_PASSWORD: ${{ secrets.IOS_CERTIFICATE_PASSWORD }}
+          IOS_MOBILE_PROVISION: ${{ secrets.IOS_MOBILE_PROVISION }}
+      - uses: actions/upload-artifact@v4
+        with:
+          name: DarkSchool-ios
+          path: src-tauri/gen/apple/build/arm64/*.ipa

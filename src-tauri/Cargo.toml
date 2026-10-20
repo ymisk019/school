@@ -1,0 +1,21 @@
+[package]
+name = "dark-school"
+version = "1.0.0"
+description = "DARK SCHOOL - 3D horror game"
+edition = "2021"
+
+[lib]
+name = "dark_school_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+
+[profile.release]
+opt-level = "s"
+lto = true
+codegen-units = 1
+strip = true
